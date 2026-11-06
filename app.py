@@ -1,518 +1,483 @@
-# -*- coding: utf-8 -*-
-import os
 import io
+import itertools
+import os
+import sqlite3
 import re
-import hashlib
-import datetime
-from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
-from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-import pdfplumber
-from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, ForeignKey, desc, text
-from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
+from datetime import date
+from typing import Optional, List
+from fastapi import FastAPI, Form, Request, Response, File, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pypdf import PdfReader
 
-import clinical_rules
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+DB_FILE = os.path.join(BASE_DIR, "clinica.db")
 
-# ==============================================================================
-# BASE DE DADOS POSTGRESQL / SQLITE
-# ==============================================================================
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./farmbeers.db")
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+os.makedirs(STATIC_DIR, exist_ok=True)
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+app = FastAPI(title="Radar Clínico")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True,
-    pool_recycle=300
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+LOGO_BASE64 = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI0MCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMEU3NDkwIiBzdHJva2Utd2lkdGg9IjgiIHN0cm9rZS1kYXNoYXJyYXk9IjEwIDEwIi8+PHJlY3QgeD0iNDAiIHk9IjQwIiB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIGZpbGw9IiMwNkI2RDQiIHJ4PSI1Ii8+PC9zdmc+"
+LOGO_URL = "https://raw.githubusercontent.com/nobertogon-coder/radar-clinico/main/static/logo.jpg"
 
-def hash_password(password: str) -> str:
-    salt = "FB_CLINICAL_SALT_2026"
-    return hashlib.sha256((password + salt).encode("utf-8")).hexdigest()
-
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(50), unique=True, index=True, nullable=False)
-    password = Column(String(100), nullable=False)
-    role = Column(String(20), default="pharmacist")
-    is_active = Column(Boolean, default=True)
-    last_ping = Column(DateTime, default=datetime.datetime.utcnow)
-
-class ScreeningRecord(Base):
-    __tablename__ = "screenings"
-    id = Column(Integer, primary_key=True, index=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    pharmacist_username = Column(String(50), default="admin", nullable=True)
-    sector = Column(String(50), default="Enfermaria", nullable=False)
-    patient_age = Column(Integer, default=70, nullable=True)
-    crcl_ml_min = Column(Float, nullable=True)
-    acb_score = Column(Integer, default=0, nullable=True)
-    total_alerts = Column(Integer, default=0, nullable=True)
-    alerts = relationship("ScreeningAlertRecord", back_populates="screening", cascade="all, delete-orphan")
-
-class ScreeningAlertRecord(Base):
-    __tablename__ = "screening_alerts"
-    id = Column(Integer, primary_key=True, index=True)
-    screening_id = Column(Integer, ForeignKey("screenings.id", ondelete="CASCADE"), nullable=True)
-    drug_name = Column(String(150), nullable=False, default="Medicamento")
-    axis = Column(String(100), nullable=False, default="AGS Beers 2023")
-    recommendation = Column(String(1000), nullable=False, default="Reavaliar prescrição.")
-    outcome = Column(String(30), default="pending", nullable=True)
-    screening = relationship("ScreeningRecord", back_populates="alerts")
-
-Base.metadata.create_all(bind=engine)
-
-def run_auto_migrations():
-    with engine.connect() as conn:
-        try:
-            if not DATABASE_URL.startswith("sqlite"):
-                conn.execute(text("ALTER TABLE screening_alerts ADD COLUMN IF NOT EXISTS outcome VARCHAR(30) DEFAULT 'pending';"))
-                conn.execute(text("ALTER TABLE screenings ADD COLUMN IF NOT EXISTS total_alerts INTEGER DEFAULT 0;"))
-                conn.execute(text("ALTER TABLE screenings ADD COLUMN IF NOT EXISTS acb_score INTEGER DEFAULT 0;"))
-                conn.execute(text("ALTER TABLE screenings ADD COLUMN IF NOT EXISTS crcl_ml_min DOUBLE PRECISION;"))
-                conn.commit()
-        except Exception:
-            pass
-run_auto_migrations()
-
-def get_db():
-    db = SessionLocal()
+# ==========================================
+# 1. AUTENTICAÇÃO E LOGIN
+# ==========================================
+def obter_usuario_logado(request: Request):
+    token = request.cookies.get("session_token")
+    if not token: return None
     try:
-        yield db
-    finally:
-        db.close()
-
-def init_default_users():
-    db = SessionLocal()
-    try:
-        defaults = [
-            ("admin", "admin123", "admin"),
-            ("farmaceutico", "farm123", "pharmacist"),
-            ("Teste", "teste123", "pharmacist")
-        ]
-        for u, p, r in defaults:
-            user = db.query(User).filter(User.username == u).first()
-            if not user:
-                new_user = User(
-                    username=u, password=hash_password(p), role=r,
-                    is_active=True, last_ping=datetime.datetime.utcnow()
-                )
-                db.add(new_user)
-            else:
-                if user.password == p:
-                    user.password = hash_password(p)
-        db.commit()
+        with sqlite3.connect(DB_FILE) as conn:
+            return conn.cursor().execute("SELECT usuario, perfil FROM usuarios WHERE usuario = ?", (token,)).fetchone()
     except Exception:
-        db.rollback()
-    finally:
-        db.close()
+        return None
 
-init_default_users()
-
-app = FastAPI(title="Radar Beers API", version="10.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-class PingRequest(BaseModel):
-    username: str
-
-class CreateUserRequest(BaseModel):
-    username: str
-    password: str
-    role: str
-
-class OutcomeRequest(BaseModel):
-    outcome: str
-
-class TextExtractRequest(BaseModel):
-    text: str
-
-class MedicationInput(BaseModel):
-    name: str
-    dose: Optional[str] = ""
-    route: Optional[str] = "VO (Oral)"
-    frequency: Optional[str] = ""
-    is_sos: Optional[bool] = False
-
-class ScreeningPayload(BaseModel):
-    age: Optional[int] = 70
-    sector: Optional[str] = "Enfermaria"
-    fall_risk: Optional[bool] = False
-    conditions: Optional[List[str]] = []
-    crcl_ml_min: Optional[float] = None
-    crcl_notes: Optional[str] = ""
-    medications: List[MedicationInput] = []
-    persist: Optional[bool] = True
-
-# ==============================================================================
-# AUTENTICAÇÃO E USUÁRIOS
-# ==============================================================================
-@app.post("/api/v1/auth/login")
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    pwd_h = hash_password(payload.password)
-    user = db.query(User).filter(User.username == payload.username).first()
-    if not user or (user.password != pwd_h and user.password != payload.password):
-        raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
-    if user.password == payload.password:
-        user.password = pwd_h
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="Acesso bloqueado pela administração.")
-    user.last_ping = datetime.datetime.utcnow()
-    db.commit()
-    return {"status": "ok", "user": {"id": user.id, "username": user.username, "role": user.role}}
-
-@app.post("/api/v1/auth/ping")
-def ping_user(payload: PingRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == payload.username).first()
-    if user:
-        user.last_ping = datetime.datetime.utcnow()
-        db.commit()
-    return {"status": "alive"}
-
-@app.post("/api/v1/auth/logout")
-def logout_user(payload: PingRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == payload.username).first()
-    if user:
-        user.last_ping = datetime.datetime.utcnow() - datetime.timedelta(minutes=10)
-        db.commit()
-    return {"status": "logged_out"}
-
-@app.get("/api/v1/admin/users")
-def list_users(db: Session = Depends(get_db)):
-    users = db.query(User).all()
-    now = datetime.datetime.utcnow()
-    return [{
-        "id": u.id, "username": u.username, "role": u.role,
-        "is_active": u.is_active,
-        "is_online": bool(u.last_ping and (now - u.last_ping).total_seconds() <= 60)
-    } for u in users]
-
-@app.post("/api/v1/admin/users")
-def create_user(payload: CreateUserRequest, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == payload.username).first():
-        raise HTTPException(status_code=400, detail="Nome de usuário já cadastrado.")
-    new_u = User(
-        username=payload.username, password=hash_password(payload.password),
-        role=payload.role, is_active=True, last_ping=datetime.datetime.utcnow()
-    )
-    db.add(new_u)
-    db.commit()
-    return {"status": "created"}
-
-@app.patch("/api/v1/admin/users/{user_id}/toggle-status")
-def toggle_user_status(user_id: int, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.id == user_id).first()
-    if not u:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-    if u.username == "admin":
-        raise HTTPException(status_code=400, detail="Não é permitido bloquear o administrador padrão.")
-    u.is_active = not u.is_active
-    db.commit()
-    return {"status": "updated", "is_active": u.is_active}
-
-@app.delete("/api/v1/admin/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.id == user_id).first()
-    if not u:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado.")
-    if u.username == "admin":
-        raise HTTPException(status_code=400, detail="Não é permitido excluir o administrador padrão.")
-    db.delete(u)
-    db.commit()
-    return {"status": "deleted"}
-
-# ==============================================================================
-# MÉTRICAS (EXCLUSIVO ENFERMARIA)
-# ==============================================================================
-@app.get("/api/v1/admin/metrics")
-def get_metrics(year: Optional[str] = None, month: Optional[str] = None, day: Optional[str] = None, db: Session = Depends(get_db)):
-    try:
-        all_screenings = db.query(ScreeningRecord).order_by(desc(ScreeningRecord.created_at)).all()
-        screenings = []
-        for s in all_screenings:
-            dt = s.created_at
-            if dt and year and year.strip().isdigit() and dt.year != int(year.strip()):
-                continue
-            if dt and month and month.strip().isdigit() and dt.month != int(month.strip()):
-                continue
-            if dt and day and day.strip().isdigit() and dt.day != int(day.strip()):
-                continue
-            screenings.append(s)
-
-        total_patients = len(screenings)
-        s_ids = [s.id for s in screenings]
-
-        if s_ids:
-            alerts = db.query(ScreeningAlertRecord).filter(ScreeningAlertRecord.screening_id.in_(s_ids)).all()
-            total_alerts = len(alerts)
-            accepted_count = sum(1 for a in alerts if a.outcome == "accepted")
-            counts = {}
-            for a in alerts:
-                d_name = a.drug_name or "Medicamento"
-                counts[d_name] = counts.get(d_name, 0) + 1
-            sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:5]
-            top_5 = [{"drug": k, "count": v} for k, v in sorted_counts]
-        else:
-            total_alerts = sum((s.total_alerts or 0) for s in screenings)
-            accepted_count = 0
-            top_5 = []
-
-        acceptance_rate = round((accepted_count / total_alerts * 100), 1) if total_alerts > 0 else 0.0
-
-        return {
-            "total_patients": total_patients,
-            "count_enfermaria": total_patients,
-            "total_beers_alerts": total_alerts,
-            "accepted_interventions": accepted_count,
-            "acceptance_rate": acceptance_rate,
-            "top_5_beers": top_5
-        }
-    except Exception:
-        return {
-            "total_patients": 0, "count_enfermaria": 0,
-            "total_beers_alerts": 0, "accepted_interventions": 0,
-            "acceptance_rate": 0.0, "top_5_beers": []
-        }
-
-@app.patch("/api/v1/alerts/{alert_id}/outcome")
-def update_alert_outcome(alert_id: int, payload: OutcomeRequest, db: Session = Depends(get_db)):
-    try:
-        alert_rec = db.query(ScreeningAlertRecord).filter(ScreeningAlertRecord.id == alert_id).first()
-        if not alert_rec:
-            return {"status": "not_found", "alert_id": alert_id}
-        alert_rec.outcome = payload.outcome
-        db.commit()
-        return {"status": "updated", "alert_id": alert_id, "outcome": alert_rec.outcome}
-    except Exception as e:
-        db.rollback()
-        return {"status": "error", "detail": str(e)}
-
-# ==============================================================================
-# MOTOR DE TRIAGEM
-# ==============================================================================
-@app.post("/api/v1/screen")
-def process_screening(payload: ScreeningPayload, db: Session = Depends(get_db)):
-    patient_age = payload.age if (payload.age and payload.age > 0) else 70
-    med_dicts = [m.model_dump() for m in payload.medications]
-
-    alerts_raw, acb_total, acb_text, med_tag_map = clinical_rules.evaluate_patient_beers(
-        medications=med_dicts,
-        age=patient_age,
-        fall_risk=bool(payload.fall_risk),
-        conditions=payload.conditions or [],
-        crcl=payload.crcl_ml_min
-    )
-
-    persisted_records = []
-    if payload.medications and payload.persist:
-        try:
-            record = ScreeningRecord(
-                pharmacist_username="admin",
-                sector="Enfermaria",
-                patient_age=int(patient_age),
-                crcl_ml_min=float(payload.crcl_ml_min) if payload.crcl_ml_min is not None else None,
-                acb_score=int(acb_total),
-                total_alerts=len(alerts_raw),
-                created_at=datetime.datetime.utcnow()
-            )
-            db.add(record)
-            db.commit()
-            db.refresh(record)
-
-            for a in alerts_raw:
-                d_name = str(a.get("drug", "Medicamento"))
-                alert_rec = ScreeningAlertRecord(
-                    screening_id=record.id,
-                    drug_name=d_name,
-                    axis=str(a.get("axis", "AGS Beers 2023")),
-                    recommendation=str(a.get("recommendation", "Reavaliar prescrição.")),
-                    outcome="pending"
-                )
-                db.add(alert_rec)
-                db.commit()
-                db.refresh(alert_rec)
-                persisted_records.append(alert_rec.id)
-        except Exception:
-            db.rollback()
-
-    alerts_complete = []
-    for idx, a in enumerate(alerts_raw):
-        alerts_complete.append({
-            "id": persisted_records[idx] if idx < len(persisted_records) else None,
-            "drug": a.get("drug"),
-            "drug_name": a.get("drug"),
-            "axis": a.get("axis"),
-            "recommendation": a.get("recommendation"),
-            "rationale": a.get("rationale"),
-            "tapering": a.get("tapering"),
-            "is_sos": a.get("is_sos", False),
-            "acb_score": a.get("acb_score", 0),
-            "outcome": "pending"
-        })
-
-    alert_by_canonical = {a["drug"].strip().lower(): a for a in alerts_complete}
-
-    med_rows = []
-    for m in payload.medications:
-        canonical_name = clinical_rules.identify_drug_canonical(m.name)
-        matched = alert_by_canonical.get(canonical_name.lower()) if canonical_name else None
-
-        parts = [p for p in [m.dose, m.route, m.frequency] if p and p.strip()]
-        dose_route_str = " ".join(parts) if parts else "VO (Oral)"
-
-        is_sn_flag = bool(m.is_sos) or any(t in dose_route_str.lower() for t in ["sn", "qn", "sos", "necessario", "necessário"])
-        if is_sn_flag and "[SN/QN]" not in dose_route_str:
-            dose_route_str = f"{dose_route_str} [SN/QN]"
-
-        tag_str = ""
-        is_beers = False
-
-        if canonical_name and canonical_name in med_tag_map:
-            tag_str = med_tag_map[canonical_name]
-            is_beers = True
-        elif matched:
-            tag_str = matched.get("axis", "AGS Beers 2023")
-            is_beers = True
-
-        med_rows.append({
-            "name": canonical_name.capitalize() if canonical_name else m.name,
-            "dose_route": dose_route_str,
-            "is_beers": is_beers,
-            "is_sos": is_sn_flag,
-            "alert_tag": tag_str
-        })
-
-    return {
-        "total_beers_alerts": len(alerts_complete),
-        "acb_score": acb_total,
-        "acb_interpretation": acb_text,
-        "alerts": alerts_complete,
-        "medication_rows": med_rows
-    }
-
-# ==============================================================================
-# EXTRAÇÃO DE TEXTO E PDF HOSPITALAR
-# ==============================================================================
-def extract_posology_details(line: str):
-    dose = ""
-    route = "VO (Oral)"
-    freq = ""
-    is_sn = False
-
-    m_dose = re.search(r'(\b\d+[\.,]?\d*\s*(?:mg|g|mcg|ml|gotas|gota|ampola|amp|cp|comp|frasco|ui)\b)', line, re.I)
-    if m_dose:
-        dose = m_dose.group(1).strip()
-
-    if re.search(r'\b(iv|ev|endovenos[ao]|intravenos[ao])\b', line, re.I):
-        route = "IV (Endovenoso)"
-    elif re.search(r'\b(im|intramuscular)\b', line, re.I):
-        route = "IM (Intramuscular)"
-    elif re.search(r'\b(sc|subcutane[ao])\b', line, re.I):
-        route = "SC (Subcutâneo)"
-    elif re.search(r'\b(inalat[oó]ri[ao]|neb|inal)\b', line, re.I):
-        route = "Inalatório"
-    elif re.search(r'\b(t[oó]pic[ao]|creme|pomada)\b', line, re.I):
-        route = "Tópico"
-
-    if re.search(r'\b(sn|qn|sos|se\s+necess[aá]rio|quando\s+necess[aá]rio|a\s+crit[eé]rio\s+m[eé]dico|acm)\b', line, re.I):
-        is_sn = True
-        freq = "SN (Se Necessário)"
-    else:
-        m_freq = re.search(r'(\b\d{1,2}\s*/\s*\d{1,2}\s*h|\b\d{1,2}\s*em\s*\d{1,2}\s*h|\b\d{1,2}x\s*/\s*dia|\b\d{1,2}x\s*ao\s*dia|\b1x\b|\b2x\b|\b3x\b|\b4x\b|\bmanh[aã]\b|\bnoite\b|\b12/12h\b|\b8/8h\b|\b6/6h\b|\b24/24h\b)', line, re.I)
-        if m_freq:
-            freq = m_freq.group(1).strip()
-
-    return dose, route, freq, is_sn
-
-def parse_prescription_lines(raw_text: str):
-    extracted_items = []
-    seen_generics = set()
-    for line in raw_text.split("\n"):
-        line_clean = line.strip()
-        if not line_clean:
-            continue
-        normalized_line = clinical_rules.normalize_text(line_clean)
-        found_generics_in_line = []
-        for generic, synonyms in clinical_rules.BEERS_DRUGS.items():
-            for syn in synonyms:
-                if clinical_rules.normalize_text(syn) in normalized_line:
-                    if generic not in found_generics_in_line:
-                        found_generics_in_line.append(generic)
-                    break
-        for generic in found_generics_in_line:
-            if generic not in seen_generics:
-                seen_generics.add(generic)
-                dose, route, freq, is_sn = extract_posology_details(line_clean)
-                extracted_items.append({
-                    "name": generic.capitalize(),
-                    "dose": dose,
-                    "route": route,
-                    "frequency": freq,
-                    "is_sos": is_sn
-                })
-    return extracted_items
-
-@app.post("/api/v1/prescription/extract-pdf")
-async def extract_pdf(file: UploadFile = File(...)):
-    contents = await file.read()
-    full_text = ""
-    try:
-        with pdfplumber.open(io.BytesIO(contents)) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text()
-                if t:
-                    full_text += t + "\n"
-        extracted_items = parse_prescription_lines(full_text)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro ao ler PDF: {str(e)}")
-
-    drug_names = [it["name"] for it in extracted_items]
-    return {"medications": drug_names, "drugs": drug_names, "items": extracted_items}
-
-@app.post("/api/v1/prescription/extract-text")
-def extract_text(payload: TextExtractRequest):
-    extracted_items = parse_prescription_lines(payload.text)
-    drug_names = [it["name"] for it in extracted_items]
-    return {"medications": drug_names, "drugs": drug_names, "items": extracted_items}
-
-# ==============================================================================
-# ROTAS DO FRONTEND, MANUAL E LOGO
-# ==============================================================================
 @app.get("/", response_class=HTMLResponse)
-def read_root():
-    if os.path.exists("index.html"):
-        with open("index.html", "r", encoding="utf-8") as f:
-            return f.read()
-    return "<h1>Radar Beers Online. Arquivo index.html não localizado.</h1>"
+async def login_page(request: Request, erro: str = ""):
+    if obter_usuario_logado(request): 
+        return RedirectResponse("/dashboard", 302)
+    
+    msg_erro = f"<div class='alert alert-danger p-2 small mb-3 text-center' style='border-radius:6px;'>{erro}</div>" if erro else ""
+    
+    return HTMLResponse(f"""
+    <!DOCTYPE html>
+    <html lang="pt-br">
+    <head>
+        <meta charset="UTF-8">
+        <title>Login | Radar Clínico</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        <style>
+            body {{ background-color: #4B5563; height: 100vh; display: flex; align-items: center; justify-content: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+            .login-card {{ background: #ffffff; border-radius: 12px; padding: 2.5rem; width: 100%; max-width: 380px; box-shadow: 0 10px 25px rgba(0,0,0,0.15); }}
+            .logo-box {{ background-color: #F8FAFC; border-radius: 12px; width: 110px; height: 110px; margin: 0 auto 1rem auto; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
+            .logo-box img {{ max-width: 80%; max-height: 80%; object-fit: contain; }}
+            .badge-acesso {{ background-color: #F0FDFA; color: #0E7490; font-weight: 700; font-size: 0.7rem; padding: 0.4rem 1rem; border-radius: 20px; margin-bottom: 1.5rem; display: block; width: fit-content; margin-left: auto; margin-right: auto; border: 1px solid #CCFBF1; letter-spacing: 0.5px; }}
+            .form-label-custom {{ text-align: left; display: block; font-size: 0.75rem; font-weight: 700; color: #475569; margin-bottom: 0.3rem; text-transform: uppercase; }}
+            .form-control-custom {{ border-radius: 6px; border: 1px solid #CBD5E1; padding: 0.6rem 0.8rem; margin-bottom: 1.2rem; width: 100%; font-size: 0.95rem; }}
+            .form-control-custom:focus {{ border-color: #0E7490; outline: none; box-shadow: 0 0 0 3px rgba(14,116,144, 0.1); }}
+            .btn-login {{ background-color: #0E7490; color: white; font-weight: 600; font-size: 0.9rem; border: none; border-radius: 6px; padding: 0.7rem; width: 100%; margin-top: 0.5rem; transition: 0.2s; }}
+            .btn-login:hover {{ background-color: #06B6D4; color: white; }}
+        </style>
+    </head>
+    <body>
+        <div class="login-card">
+            <div class="logo-box">
+                <img src="{LOGO_URL}" alt="Logo do Radar Clínico" onerror="this.onerror=null; this.src='{LOGO_BASE64}';">
+            </div>
+            <div class="badge-acesso">ACESSO FARMACÊUTICO</div>
+            {msg_erro}
+            <form action="/login" method="post" style="text-align: left;">
+                <label class="form-label-custom">USUÁRIO</label>
+                <input type="text" name="usuario" class="form-control-custom" placeholder="admin" required>
+                <label class="form-label-custom">SENHA</label>
+                <input type="password" name="senha" class="form-control-custom" placeholder="••••••••" required>
+                <button type="submit" class="btn-login">Entrar no Sistema</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """)
 
-@app.get("/manual.html", response_class=HTMLResponse)
-def read_manual():
-    if os.path.exists("manual.html"):
-        with open("manual.html", "r", encoding="utf-8") as f:
-            return f.read()
-    return "<h1>Manual Operacional não encontrado.</h1>"
+@app.post("/login")
+async def processar_login(usuario: str = Form(...), senha: str = Form(...)):
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            user = conn.cursor().execute("SELECT usuario FROM usuarios WHERE usuario = ? AND senha = ?", (usuario.strip(), senha.strip())).fetchone()
+        if user:
+            res = RedirectResponse("/dashboard", 302)
+            res.set_cookie("session_token", user[0], httponly=True)
+            return res
+        return RedirectResponse("/?erro=Credenciais+inválidas", 302)
+    except Exception:
+        return RedirectResponse("/?erro=Erro+de+conexão+com+o+banco", 302)
 
-# ROTA PARA ENTREGAR A SUA LOGO
-@app.get("/logo.jpg")
-def get_logo():
-    if os.path.exists("logo.jpg"):
-        return FileResponse("logo.jpg")
-    raise HTTPException(status_code=404, detail="Logo não encontrada no servidor")
+@app.get("/logout")
+async def logout():
+    res = RedirectResponse("/", 302)
+    res.delete_cookie("session_token")
+    return res
+
+# ==========================================
+# 2. MOTOR CLÍNICO E PDF (SEPARAÇÃO ATB vs GERAL)
+# ==========================================
+def extrair_texto_pdf(arquivo_bytes: bytes):
+    try:
+        reader = PdfReader(io.BytesIO(arquivo_bytes))
+        texto = " ".join([p.extract_text() for p in reader.pages if p.extract_text()]).lower()
+        palavras_texto = set(re.findall(r'\b[a-zãõáéíóúç-]+\b', texto))
+        
+        with sqlite3.connect(DB_FILE) as conn:
+            lista_atbs = conn.cursor().execute("SELECT id, nome FROM antibioticos").fetchall()
+            outros = [r[0].lower() for r in conn.cursor().execute("SELECT DISTINCT farmaco_a FROM interacoes_db UNION SELECT DISTINCT farmaco_b FROM interacoes_db UNION SELECT farmaco FROM interacoes_alimento UNION SELECT termo_farmaco FROM interacoes_doenca").fetchall()]
+        
+        achados_geral, achados_atb_ids = [], []
+        
+        # Procura Antibióticos
+        for atb_id, atb_nome in lista_atbs:
+            nm = atb_nome.split("(")[0].strip().lower()
+            if nm in palavras_texto: 
+                achados_atb_ids.append(atb_id)
+                
+        # Procura outros medicamentos (Lista Geral)
+        for farmaco in outros:
+            if farmaco in palavras_texto and farmaco.title() not in achados_geral: 
+                achados_geral.append(farmaco.title())
+                
+        return achados_atb_ids[:4], ", ".join(achados_geral)
+    except Exception: return [], ""
+
+def checar_alertas_multiplos(farmacos: list, comorbs: list, alergia: str):
+    interacoes, alertas_clinicos, alertas_alergia = [], [], []
+    farmacos_limpos = [f.lower().strip().split("(")[0].strip() for f in farmacos]
+    
+    with sqlite3.connect(DB_FILE) as conn:
+        regras_int = conn.cursor().execute("SELECT farmaco_a, farmaco_b, gravidade, detalhe FROM interacoes_db").fetchall()
+        regras_doenca = conn.cursor().execute("SELECT termo_farmaco, comorbidade, alerta FROM interacoes_doenca").fetchall()
+        regras_alergia = conn.cursor().execute("SELECT farmaco_prescrito, risco FROM alergias_cruzadas WHERE classe_alergia='penicilina'").fetchall()
+
+    for f1, f2 in itertools.combinations(farmacos_limpos, 2):
+        for fa, fb, grav, det in regras_int:
+            if (fa in f1 and fb in f2) or (fb in f1 and fa in f2):
+                interacoes.append({"par": f"{f1.title()} + {f2.title()}", "gravidade": grav, "detalhe": det})
+                
+    for f in farmacos_limpos:
+        for tf, c_db, alerta in regras_doenca:
+            if tf in f and c_db in [c.lower() for c in comorbs]: alertas_clinicos.append(alerta)
+        if alergia == "sim":
+            for fp, risco in regras_alergia:
+                if fp in f: alertas_alergia.append(f"Alergia Penicilina -> {f.title()}: {risco}")
+                
+    return interacoes, list(set(alertas_clinicos)), list(set(alertas_alergia))
+
+# ==========================================
+# 3. INTERFACE DASHBOARD
+# ==========================================
+def gerar_html_dashboard(usuario, perfil, antibioticos=None, preenchimento_pdf="", pdf_atbs=None, resultado=None, aba_admin=False, msg_admin=""):
+    pdf_atbs = pdf_atbs or []
+    antibioticos = antibioticos or []
+    clcr_display = f"{resultado['clcr']}" if resultado else "--"
+    status_display = f"{len(resultado['interacoes'])}" if resultado else "0"
+    
+    if aba_admin:
+        with sqlite3.connect(DB_FILE) as conn:
+            lista_users = conn.cursor().execute("SELECT id, usuario, perfil FROM usuarios").fetchall()
+        tbl_users = "".join([f"<tr><td>{u[1]}</td><td><span class='badge bg-{'teal' if u[2]=='admin' else 'secondary'}'>{u[2].upper()}</span></td></tr>" for u in lista_users])
+        conteudo_corpo = f"""
+        <div class="card-custom">
+            <h5 class="fw-bold text-teal mb-4">Painel do Administrador</h5>
+            {f"<div class='alert alert-info py-2'>{msg_admin}</div>" if msg_admin else ""}
+            <div class="row">
+                <div class="col-md-4">
+                    <form action="/cadastrar_usuario" method="post" class="p-4 border rounded bg-light">
+                        <label class="form-label-custom">Novo Usuário</label>
+                        <input type="text" name="novo_usuario" class="form-control form-control-sm mb-3" required>
+                        <label class="form-label-custom">Senha</label>
+                        <input type="password" name="nova_senha" class="form-control form-control-sm mb-3" required>
+                        <label class="form-label-custom">Perfil</label>
+                        <select name="novo_perfil" class="form-select form-select-sm mb-4">
+                            <option value="user">Padrão (Farmácia)</option>
+                            <option value="admin">Administrador</option>
+                        </select>
+                        <button type="submit" class="btn btn-radar w-100 fw-bold">CADASTRAR</button>
+                    </form>
+                </div>
+                <div class="col-md-8">
+                    <table class="table table-bordered bg-white">
+                        <thead class="table-light"><tr><th>Usuário</th><th>Perfil de Acesso</th></tr></thead>
+                        <tbody>{tbl_users}</tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        """
+    else:
+        tags_iniciais = "".join([f'<option value="{m.strip()}" selected>{m.strip()}</option>' for m in preenchimento_pdf.split(",") if m.strip()])
+        slots_atb = ""
+        for i in range(1, 5):
+            selec = pdf_atbs[i-1] if (i-1) < len(pdf_atbs) else None
+            op = '<option value="">(Selecione o antimicrobiano...)</option>'
+            for a in antibioticos:
+                sel = "selected" if selec == a[0] else ""
+                op += f'<option value="{a[0]}" data-nome="{a[1]}" {sel}>{a[1]} ({a[2]})</option>'
+            slots_atb += f'<div class="row g-2 mb-2"><div class="col-md-8"><select name="atb_id_{i}" class="select-search slot-atb">{op}</select></div><div class="col-md-4"><input type="text" name="dose_{i}" class="form-control form-control-sm" placeholder="Ex: 1g EV 8/8h"></div></div>'
+
+        painel_resultado = '<div class="text-center text-muted p-5 bg-light rounded" style="border: 1px dashed #cbd5e1;">Nenhuma avaliação realizada ainda.</div>'
+        if resultado:
+            alertas = ""
+            for a in resultado.get("alertas_dieta", []): alertas += f"<div class='alert alert-warning p-2 small mb-2'><strong>Nutrição:</strong> {a}</div>"
+            for a in resultado.get("alertas_doenca", []): alertas += f"<div class='alert alert-warning p-2 small mb-2'><strong>Comorbilidade:</strong> {a}</div>"
+            for a in resultado.get("alertas_alergia", []): alertas += f"<div class='alert alert-danger p-2 small mb-2'><strong>Alergia:</strong> {a}</div>"
+            for i in resultado.get("interacoes", []): alertas += f"<div class='alert alert-danger p-2 small mb-2'><strong>{i['gravidade']}:</strong> {i['par']} - {i['detalhe']}</div>"
+            painel_resultado = f'<div class="d-flex justify-content-between mb-2"><h6 class="fw-bold text-teal mb-0">Avaliação SOAP</h6><button type="button" class="btn btn-outline-teal btn-sm py-0 px-2" onclick="copiarParecer()">Copiar</button></div>{alertas}<textarea id="parecerTexto" class="form-control font-monospace bg-light p-3 border rounded-3" rows="12" readonly>{resultado["parecer_texto"]}</textarea>'
+
+        conteudo_corpo = f"""
+        <div class="row g-4 mb-4">
+            <!-- COLUNA 1 -->
+            <div class="col-lg-4">
+                <form id="formClinico" action="/avaliar" method="post">
+                <div class="card-custom h-100">
+                    <h6 class="card-title-custom"><span class="number-badge">1</span> PACIENTE & COMORBILIDADES</h6>
+                    <div class="row g-2 mb-3">
+                        <div class="col-6"><label class="form-label-custom">Idade (Anos)</label><input type="number" name="idade" class="form-control form-control-sm"></div>
+                        <div class="col-6"><label class="form-label-custom">Setor</label><select class="form-select form-select-sm"><option>Enfermaria</option></select></div>
+                    </div>
+                    <div class="row g-2 mb-3">
+                        <div class="col-6"><label class="form-label-custom">Dieta / Sonda</label><select name="sonda_enteral" class="form-select form-select-sm"><option value="nao">Dieta Livre</option><option value="sim">Sonda Enteral</option></select></div>
+                        <div class="col-6"><label class="form-label-custom">Diálise</label><select name="metodo_dialise" class="form-select form-select-sm"><option value="">Conservador</option><option value="HDI">Hemodiálise</option></select></div>
+                    </div>
+                    <label class="form-label-custom">Comorbilidades Clássicas</label>
+                    <select name="comorbidades" id="comorb_select" multiple class="mb-3">
+                        <option value="icc">Insuficiência Cardíaca</option>
+                        <option value="asma">Asma / DPOC</option>
+                        <option value="epilepsia">Epilepsia / Convulsão</option>
+                        <option value="hepatopatia">Disfunção Hepática</option>
+                    </select>
+                    <label class="form-label-custom text-danger">ALERGIA</label>
+                    <select name="alergia_beta" class="form-select form-select-sm border-danger"><option value="nao">Não / Desconhecida</option><option value="sim">Sim (Penicilinas)</option></select>
+                </div>
+            </div>
+
+            <!-- COLUNA 2 -->
+            <div class="col-lg-4">
+                <div class="card-custom h-100">
+                    <h6 class="card-title-custom"><span class="number-badge">2</span> FUNÇÃO RENAL & PROFILAXIAS</h6>
+                    <div class="row g-2 mb-3">
+                        <div class="col-6"><label class="form-label-custom">Creat. (mg/dL)</label><input type="number" step="0.01" name="creatinina" class="form-control form-control-sm"></div>
+                        <div class="col-6"><label class="form-label-custom">Peso (kg)</label><input type="number" step="0.1" name="peso" class="form-control form-control-sm"></div>
+                    </div>
+                    <div class="bg-light p-2 rounded border text-center mb-3">
+                        <small class="text-muted fw-bold d-block mb-1">DEPURAÇÃO ESTIMADA</small>
+                        <h4 class="text-teal mb-0 fw-bold">{clcr_display} <small style="font-size:0.9rem">mL/min</small></h4>
+                    </div>
+                    <hr>
+                    <div class="row g-2">
+                        <div class="col-6"><label class="form-label-custom">Heparina?</label><select name="tev_prescrito" class="form-select form-select-sm"><option value="nao">Não</option><option value="sim">Sim</option></select></div>
+                        <div class="col-6"><label class="form-label-custom">Escore Pádua</label><select name="pontos_padua" class="form-select form-select-sm"><option value="baixo">Baixo Risco</option><option value="alto">Alto Risco</option></select></div>
+                        <div class="col-6"><label class="form-label-custom">Omeprazol?</label><select name="ibp_prescrito" class="form-select form-select-sm"><option value="nao">Não</option><option value="sim">Sim</option></select></div>
+                        <div class="col-6"><label class="form-label-custom">Uso AINEs?</label><select name="uso_aine_corticoide" class="form-select form-select-sm"><option value="nao">Não</option><option value="sim">Sim</option></select></div>
+                        <div class="col-12"><label class="form-label-custom text-danger">Plaquetopenia / Sangramento?</label><select name="plaquetas_baixas" class="form-select form-select-sm border-danger"><option value="nao">Não</option><option value="sim">Sim (Contraindicado)</option></select></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- COLUNA 3 -->
+            <div class="col-lg-4">
+                </form>
+                <div class="card-custom h-100">
+                    <h6 class="card-title-custom"><span class="number-badge">3</span> ENTRADA DA PRESCRIÇÃO</h6>
+                    <label class="form-label-custom">PRESCRIÇÃO EM PDF (MV/TASY)</label>
+                    <form action="/upload_pdf" method="post" enctype="multipart/form-data">
+                        <div class="mb-3 p-3 bg-light rounded border text-center">
+                            <input type="file" name="arquivo_pdf" accept=".pdf" class="form-control form-control-sm mb-2" required>
+                            <button type="submit" class="btn btn-dark w-100 btn-sm fw-bold">EXTRAIR PRESCRIÇÃO</button>
+                        </div>
+                    </form>
+                    <p class="small text-muted mb-1 text-center">A extração em PDF preencherá a lista abaixo dividindo antibióticos e medicamentos gerais.</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- LINHA 4 -->
+        <div class="card-custom">
+            <h6 class="card-title-custom"><span class="number-badge">4</span> MEDICAMENTOS EM USO</h6>
+            <div class="row">
+                <div class="col-md-5 border-end pe-4">
+                    <form form="formClinico">
+                    <label class="form-label-custom">SLOTS DE ANTIMICROBIANOS</label>
+                    {slots_atb}
+                    
+                    <label class="form-label-custom mt-3">LISTA GERAL DE FÁRMACOS</label>
+                    <select id="todos_medicamentos_select" name="todos_medicamentos_lista" multiple class="mb-4">{tags_iniciais}</select>
+                    
+                    <button type="submit" class="btn btn-radar w-100 mt-3 fw-bold fs-6 py-2" onclick="document.getElementById('formClinico').submit();">AVALIAR PRESCRIÇÃO</button>
+                    </form>
+                </div>
+                <div class="col-md-7 ps-4">
+                    {painel_resultado}
+                </div>
+            </div>
+        </div>
+        """
+
+    admin_btn = f'<a class="btn btn-sm text-white fw-bold me-2" style="background-color: #0E7490; border: 1px solid #164E63;" href="/admin">ADMIN (ADMIN)</a>' if perfil == 'admin' else ''
+    
+    return f"""
+    <!DOCTYPE html>
+    <html lang="pt-br">
+    <head>
+        <meta charset="UTF-8">
+        <title>Dashboard | Radar Clínico</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link href="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/css/tom-select.bootstrap5.min.css" rel="stylesheet">
+        <style>
+            :root {{ --brand-teal: #0E7490; --brand-cyan: #06B6D4; --bg-color: #F8FAFC; }}
+            body {{ background-color: var(--bg-color); font-family: -apple-system, sans-serif; padding-bottom: 2rem; }}
+            .navbar-custom {{ background-color: var(--brand-teal); padding: 0.5rem 1.5rem; }}
+            .logo-header {{ background: #fff; border-radius: 8px; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 4px; }}
+            .logo-header img {{ max-width: 100%; max-height: 100%; object-fit: contain; }}
+            .card-custom {{ background: #fff; border-radius: 10px; border: 1px solid #E2E8F0; padding: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }}
+            .card-title-custom {{ color: var(--brand-teal); font-weight: 700; font-size: 0.95rem; display: flex; align-items: center; margin-bottom: 1.2rem; }}
+            .number-badge {{ background-color: #E0F2FE; color: var(--brand-teal); border-radius: 6px; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; margin-right: 8px; font-weight: bold; font-size: 0.85rem; }}
+            .form-label-custom {{ text-align: left; display: block; font-size: 0.7rem; font-weight: 700; color: #64748B; margin-bottom: 0.3rem; text-transform: uppercase; }}
+            .btn-radar {{ background-color: var(--brand-teal); color: white; border: none; }}
+            .btn-radar:hover {{ background-color: var(--brand-cyan); color: white; }}
+            .text-teal {{ color: var(--brand-teal) !important; }}
+            .nav-btn {{ font-size: 0.8rem; font-weight: bold; color: white; background-color: #0E7490; border: 1px solid #164E63; padding: 0.4rem 0.8rem; border-radius: 6px; text-decoration: none; margin-right: 0.5rem; }}
+            .nav-btn:hover {{ background-color: #164E63; color: white; }}
+        </style>
+    </head>
+    <body>
+        <nav class="navbar navbar-expand-lg navbar-custom">
+            <div class="container-fluid d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center gap-3">
+                    <div class="logo-header">
+                        <img src="{LOGO_URL}" alt="Logo do Radar Clínico" onerror="this.onerror=null; this.src='{LOGO_BASE64}';">
+                    </div>
+                    <a class="btn btn-sm fw-bold" style="background-color: #06B6D4; color: white; border: none; padding: 0.4rem 1rem;" href="/dashboard">↻ NOVA TRIAGEM</a>
+                </div>
+                
+                <div class="d-flex align-items-center text-white">
+                    <div class="me-4 text-end d-none d-md-block" style="line-height: 1.1;">
+                        <small style="font-size: 0.65rem; color: #bae6fd; font-weight: bold;">CLCR CALCULADO</small><br>
+                        <strong style="font-size: 1rem;">{clcr_display} <small style="font-weight: normal; font-size: 0.8rem;">mL/min</small></strong>
+                    </div>
+                    <div class="me-4 text-end d-none d-md-block" style="line-height: 1.1;">
+                        <small style="font-size: 0.65rem; color: #bae6fd; font-weight: bold;">ALERTAS CLÍNICOS</small><br>
+                        <strong style="font-size: 1rem; color: #fef08a;">{status_display}</strong>
+                    </div>
+                    
+                    <div class="d-flex align-items-center border-start border-secondary ps-3 ms-2">
+                        {admin_btn}
+                        <a href="/logout" class="btn btn-sm fw-bold ms-2" style="background-color: #DC2626; color: white; padding: 0.4rem 1rem;">Sair</a>
+                    </div>
+                </div>
+            </div>
+        </nav>
+        
+        <div class="container-fluid px-4 mt-4">
+            {conteudo_corpo}
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/js/tom-select.complete.min.js"></script>
+        <script>
+            document.querySelectorAll('.select-search').forEach(el => new TomSelect(el, {{ create: false }}));
+            const comorb = document.getElementById('comorb_select');
+            if(comorb) new TomSelect(comorb, {{ create: false, plugins: ['remove_button'] }});
+            const geral = document.getElementById('todos_medicamentos_select');
+            if(geral) {{
+                const selectGeral = new TomSelect(geral, {{ create: true, plugins: ['remove_button'] }});
+                document.querySelectorAll('.slot-atb').forEach(selectEl => {{
+                    selectEl.addEventListener('change', function() {{
+                        const atbNome = this.options[this.selectedIndex]?.getAttribute('data-nome');
+                        if (atbNome) {{ selectGeral.addOption({{ value: atbNome, text: atbNome }}); selectGeral.addItem(atbNome); }}
+                    }});
+                }});
+            }}
+            function copiarParecer() {{
+                const el = document.getElementById("parecerTexto");
+                if(el) {{ el.select(); navigator.clipboard.writeText(el.value); alert("Parecer copiado com sucesso!"); }}
+            }}
+        </script>
+    </body>
+    </html>
+    """
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    user_data = obter_usuario_logado(request)
+    if not user_data: return RedirectResponse("/logout", 302)
+    with sqlite3.connect(DB_FILE) as conn:
+        atbs = conn.cursor().execute("SELECT id, nome, classe FROM antibioticos ORDER BY nome ASC").fetchall()
+    return gerar_html_dashboard(usuario=user_data[0], perfil=user_data[1], antibioticos=atbs)
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_panel(request: Request, msg: str = ""):
+    user_data = obter_usuario_logado(request)
+    if not user_data or user_data[1] != 'admin': return RedirectResponse("/dashboard", 302)
+    return gerar_html_dashboard(usuario=user_data[0], perfil=user_data[1], aba_admin=True, msg_admin=msg)
+
+@app.post("/cadastrar_usuario")
+async def cadastrar_usuario(request: Request, novo_usuario: str = Form(...), nova_senha: str = Form(...), novo_perfil: str = Form(...)):
+    user_data = obter_usuario_logado(request)
+    if not user_data or user_data[1] != 'admin': return RedirectResponse("/dashboard", 302)
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.cursor().execute("INSERT INTO usuarios (usuario, senha, perfil) VALUES (?, ?, ?)", (novo_usuario.strip(), nova_senha.strip(), novo_perfil))
+            conn.commit()
+        return RedirectResponse("/admin?msg=Usuário+cadastrado+com+sucesso!", 302)
+    except sqlite3.IntegrityError:
+        return RedirectResponse("/admin?msg=Erro:+Este+usuário+já+existe.", 302)
+
+@app.post("/upload_pdf", response_class=HTMLResponse)
+async def upload_pdf(request: Request, arquivo_pdf: UploadFile = File(...)):
+    user_data = obter_usuario_logado(request)
+    if not user_data: return RedirectResponse("/", 302)
+    conteudo = await arquivo_pdf.read()
+    pdf_atbs, meds = extrair_texto_pdf(conteudo)
+    with sqlite3.connect(DB_FILE) as conn:
+        atbs = conn.cursor().execute("SELECT id, nome, classe FROM antibioticos ORDER BY nome ASC").fetchall()
+    return gerar_html_dashboard(usuario=user_data[0], perfil=user_data[1], antibioticos=atbs, preenchimento_pdf=meds, pdf_atbs=pdf_atbs)
+
+@app.post("/avaliar", response_class=HTMLResponse)
+async def avaliar(
+    request: Request, idade: int=Form(0), peso: float=Form(0.0), creatinina: float=Form(0.0),
+    metodo_dialise: str=Form(""), sonda_enteral: str=Form("nao"), alergia_beta: str=Form("nao"),
+    comorbidades: List[str]=Form([]), todos_medicamentos_lista: List[str]=Form([]),
+    atb_id_1: str=Form(""), atb_id_2: str=Form(""), atb_id_3: str=Form(""), atb_id_4: str=Form(""),
+    tev_prescrito: str=Form("nao"), pontos_padua: str=Form("baixo"), plaquetas_baixas: str=Form("nao"),
+    ibp_prescrito: str=Form("nao"), uso_aine_corticoide: str=Form("nao")
+):
+    user_data = obter_usuario_logado(request)
+    if not user_data: return RedirectResponse("/", 302)
+
+    clcr = round((((140 - idade) * peso) / (72 * max(creatinina, 0.8))), 1) if (creatinina > 0 and peso > 0 and idade > 0) else 0.0
+
+    avaliacoes_atb, alertas_dieta = [], []
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        for i, atb_id_str in enumerate([atb_id_1, atb_id_2, atb_id_3, atb_id_4]):
+            if atb_id_str.isdigit():
+                atb = cursor.execute("SELECT nome, dose_padrao FROM antibioticos WHERE id = ?", (int(atb_id_str),)).fetchone()
+                if atb:
+                    if metodo_dialise == "HDI": ajuste = "Dose suplementar pós-sessão de hemodiálise."
+                    else:
+                        regra = cursor.execute("SELECT conduta FROM regras_renais WHERE antibiotico_id = ? AND ? >= clcr_min AND ? <= clcr_max", (int(atb_id_str), clcr, clcr)).fetchone()
+                        ajuste = regra[0] if regra else "Dose padrão mantida."
+                    
+                    avaliacoes_atb.append(f"{i+1}. {atb[0]} | Recomendado: {atb[1]}\n   => Posologia Clínica (ClCr {clcr}): {ajuste}")
+                    if atb[0] not in todos_medicamentos_lista: todos_medicamentos_lista.append(atb[0])
+
+        if sonda_enteral == "sim":
+            for med in todos_medicamentos_lista:
+                r_dieta = cursor.execute("SELECT regra_dieta FROM interacoes_alimento WHERE farmaco = ?", (med.lower().strip(),)).fetchone()
+                if r_dieta: alertas_dieta.append(r_dieta[0])
+                
+        atbs = cursor.execute("SELECT id, nome, classe FROM antibioticos ORDER BY nome ASC").fetchall()
+
+    interacoes, alertas_doenca, alertas_alergia = checar_alertas_multiplos(todos_medicamentos_lista, comorbidades, alergia_beta)
+
+    if plaquetas_baixas == "sim": tev = "[CONTRAINDICADO] Risco hemorrágico alto. Suspender TEV farmacológico."
+    elif pontos_padua == "alto": tev = "[ADEQUADO] Alto Risco." if tev_prescrito == "sim" else "[ALERTA] Omissão de profilaxia TEV."
+    elif tev_prescrito == "sim": tev = "[ALERTA DESPRESCRIÇÃO] Baixo risco no escore de Pádua com Heparina ativa."
+    else: tev = "[ADEQUADO] Paciente de baixo risco sem necessidade de TEV."
+
+    if uso_aine_corticoide == "sim": lamg = "[ADEQUADO] Fatores presentes." if ibp_prescrito == "sim" else "[ALERTA] Omissão de IBP."
+    elif ibp_prescrito == "sim": lamg = "[ALERTA DESPRESCRIÇÃO] Uso de IBP sem indicação na enfermaria."
+    else: lamg = "[ADEQUADO] Sem indicação de gastroproteção profilática."
+
+    parecer = f"""RADAR CLÍNICO - TRIAGEM DE ENFERMARIA
+Data: {date.today().strftime('%d/%m/%Y')}
+ClCr Estimado: {clcr} mL/min | Suporte: {metodo_dialise if metodo_dialise else 'Conservador'}
+
+[ANTIMICROBIANOS E FUNÇÃO RENAL]
+{chr(10).join(avaliacoes_atb) if avaliacoes_atb else 'Sem prescrição de antimicrobianos sistémicos.'}
+
+[PROFILAXIAS INSTITUCIONAIS]
+TEV: {tev}
+LAMG: {lamg}
+"""
+    res_dict = {"parecer_texto": parecer, "alertas_dieta": alertas_dieta, "alertas_doenca": alertas_doenca, "alertas_alergia": alertas_alergia, "interacoes": interacoes, "clcr": clcr}
+    return gerar_html_dashboard(usuario=user_data[0], perfil=user_data[1], antibioticos=atbs, preenchimento_pdf=",".join(todos_medicamentos_lista), resultado=res_dict)
