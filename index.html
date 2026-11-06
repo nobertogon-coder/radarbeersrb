@@ -8,6 +8,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
+        /* Paleta exata baseada na logo Radar Beers */
         .topbar { background: linear-gradient(90deg, #064e3b 0%, #065f46 100%); border-bottom: 2px solid #10b981; }
         .text-brand { color: #065f46; }
         .bg-brand { background-color: #065f46; }
@@ -22,9 +23,11 @@
     <div id="login-modal" class="fixed inset-0 bg-slate-900/80 z-50 flex items-center justify-center p-4">
         <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-8 border border-slate-200 text-center">
             
+            <!-- Logo no Login -->
             <div class="flex flex-col items-center justify-center mb-6">
-                <!-- A imagem chama a rota /logo.jpg do backend -->
-                <img src="/logo.jpg" alt="Logo Radar Beers" class="h-32 w-auto object-contain mb-2 rounded-xl">
+                <img src="logo.jpg" alt="Logo Radar Beers" class="h-32 w-auto object-contain mb-2 rounded-xl"
+                     onerror="this.onerror=null; this.src='https://via.placeholder.com/150?text=Falta+Upload+da+Logo';">
+                
                 <p class="text-[11px] font-extrabold text-emerald-700 uppercase tracking-widest mt-1 bg-emerald-50 px-3 py-1 rounded-full border border-emerald-100">Acesso Farmacêutico</p>
             </div>
 
@@ -47,20 +50,18 @@
     <header class="topbar px-5 py-2 flex flex-wrap justify-between items-center gap-4 shadow-md hidden" id="main-header">
         <div class="flex items-center gap-5">
             
-            <!-- Logo no Cabeçalho (Sem texto adicional) -->
-            <div class="flex items-center gap-3 bg-white px-2 py-1 rounded-xl shadow-sm border border-emerald-900/30">
-                <img src="/logo.jpg" alt="Radar Beers" class="h-10 w-auto object-contain rounded-lg">
+            <!-- Logo no Cabeçalho -->
+            <div class="flex items-center gap-3 bg-white p-1 rounded-xl shadow-sm border border-emerald-900/30">
+                <img src="logo.jpg" alt="Radar Beers" class="h-11 w-auto object-contain rounded-lg"
+                     onerror="this.onerror=null; this.src='https://via.placeholder.com/40?text=X';">
             </div>
 
+            <!-- BOTÃO DE NOVA TRIAGEM -->
             <div class="flex items-center gap-2.5 ml-2">
                 <button onclick="resetScreening()" class="btn-brand font-bold text-[11px] uppercase tracking-wide px-4 py-2.5 rounded-lg flex items-center gap-1.5 shadow-sm transition">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                     Nova Triagem
                 </button>
-                <a href="/manual.html" target="_blank" class="bg-white/10 hover:bg-white/20 text-white border border-white/20 font-bold text-[11px] uppercase tracking-wide px-4 py-2.5 rounded-lg flex items-center gap-1.5 shadow-sm transition">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
-                    Manual
-                </a>
             </div>
         </div>
 
@@ -77,16 +78,13 @@
 
             <div class="h-8 w-px bg-emerald-800"></div>
 
-            <span id="current-user-label" class="text-[11px] font-bold text-white bg-black/20 px-3 py-1.5 rounded-lg uppercase tracking-wide">admin (ADMIN)</span>
+            <!-- BOTÃO ADMIN (Abre Gestão de Usuários) -->
+            <button onclick="openUsersModal()" class="bg-black/20 hover:bg-black/40 border border-emerald-500/30 text-white px-3 py-2 rounded-lg flex items-center gap-1.5 transition">
+                <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                <span id="current-user-label" class="text-[11px] font-bold uppercase tracking-wide">admin (ADMIN)</span>
+            </button>
 
-            <button onclick="openMetricsModal()" class="bg-black/20 hover:bg-black/40 border border-emerald-500/30 text-white font-semibold text-xs px-3 py-2 rounded-lg flex items-center gap-1.5 transition">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-                Métricas
-            </button>
-            <button onclick="openUsersModal()" class="bg-black/20 hover:bg-black/40 border border-emerald-500/30 text-white font-semibold text-xs px-3 py-2 rounded-lg flex items-center gap-1.5 transition">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-                Equipe
-            </button>
+            <!-- SAIR -->
             <button onclick="doLogout()" class="bg-red-600/90 hover:bg-red-700 text-white font-bold text-xs px-3 py-2 rounded-lg flex items-center gap-1 transition shadow-sm">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
                 Sair
@@ -258,39 +256,7 @@
 
     </main>
 
-    <!-- MODAL DE INDICADORES (EXCLUSIVO ENFERMARIA) -->
-    <div id="metrics-modal" class="fixed inset-0 bg-slate-900/75 z-50 hidden flex items-center justify-center p-4">
-        <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-8 border border-slate-200">
-            <div class="flex justify-between items-center border-b pb-4 mb-5">
-                <h3 class="text-lg font-black text-slate-800 uppercase tracking-tight">Indicadores Clínicos — Radar Beers</h3>
-                <button onclick="closeMetricsModal()" class="text-slate-400 hover:text-slate-700 font-bold text-2xl">&times;</button>
-            </div>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div class="bg-slate-50 p-4 rounded-xl border text-center shadow-sm">
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Pacientes</div>
-                    <div id="m-total-patients" class="text-3xl font-black text-slate-800 mt-1">0</div>
-                </div>
-                <div class="bg-amber-50 p-4 rounded-xl border border-amber-200 text-center shadow-sm">
-                    <div class="text-[10px] font-bold text-amber-700 uppercase tracking-widest">Alertas Beers</div>
-                    <div id="m-total-alerts" class="text-3xl font-black text-amber-700 mt-1">0</div>
-                </div>
-                <div class="bg-emerald-50 p-4 rounded-xl border border-emerald-200 text-center shadow-sm">
-                    <div class="text-[10px] font-bold text-emerald-700 uppercase tracking-widest">Aceitação</div>
-                    <div id="m-accepted" class="text-3xl font-black text-emerald-700 mt-1">0</div>
-                </div>
-                <div class="bg-emerald-50 p-4 rounded-xl border border-emerald-200 text-center shadow-sm">
-                    <div class="text-[10px] font-bold text-emerald-700 uppercase tracking-widest">Taxa (%)</div>
-                    <div id="m-rate" class="text-3xl font-black text-emerald-700 mt-1">0%</div>
-                </div>
-            </div>
-            <div>
-                <h4 class="text-xs font-black uppercase text-slate-600 mb-3 tracking-wider">Top 5 Medicamentos Potencialmente Inapropriados</h4>
-                <div id="m-top5" class="space-y-2 text-xs"></div>
-            </div>
-        </div>
-    </div>
-
-    <!-- MODAL DE USUÁRIOS -->
+    <!-- MODAL DE USUÁRIOS (Aberta pelo botão ADMIN) -->
     <div id="users-modal" class="fixed inset-0 bg-slate-900/75 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-2xl shadow-2xl max-w-xl w-full p-8 border border-slate-200">
             <div class="flex justify-between items-center border-b pb-4 mb-5">
@@ -309,6 +275,9 @@
             <div id="users-list" class="space-y-2 max-h-60 overflow-y-auto text-sm font-medium"></div>
         </div>
     </div>
+
+    <!-- MODAL DE MÉTRICAS (HTML Oculto mantido caso o backend retorne dados, mas sem botão UI) -->
+    <div id="metrics-modal" class="fixed inset-0 bg-slate-900/75 z-50 hidden flex items-center justify-center p-4"></div>
 
     <script>
         let medicationsList = [];
@@ -568,19 +537,6 @@
             });
             btn.parentElement.innerHTML = `<span class="text-xs font-black uppercase tracking-wider px-4 py-2 rounded-lg ${outcome === 'accepted' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' : 'bg-slate-200 text-slate-600 border border-slate-300'}">${outcome === 'accepted' ? '✓ Aceito' : '✗ Ignorado'}</span>`;
         }
-
-        async function openMetricsModal() {
-            document.getElementById('metrics-modal').classList.remove('hidden');
-            const res = await fetch(`${API_BASE_URL}/admin/metrics`);
-            const d = await res.json();
-            document.getElementById('m-total-patients').textContent = d.total_patients || 0;
-            document.getElementById('m-total-alerts').textContent = d.total_beers_alerts || 0;
-            document.getElementById('m-accepted').textContent = d.accepted_interventions || 0;
-            document.getElementById('m-rate').textContent = (d.acceptance_rate || 0) + '%';
-            const top5 = document.getElementById('m-top5');
-            top5.innerHTML = (d.top_5_beers || []).map(x => `<div class="flex justify-between bg-slate-50 p-3 rounded-xl border border-slate-200"><span class="font-bold text-slate-700">${x.drug}</span><strong class="text-amber-700 font-black">${x.count} alerta(s)</strong></div>`).join('') || '<p class="text-slate-400 font-semibold mt-2">Sem registros.</p>';
-        }
-        function closeMetricsModal() { document.getElementById('metrics-modal').classList.add('hidden'); }
 
         async function openUsersModal() {
             document.getElementById('users-modal').classList.remove('hidden');
